@@ -2,17 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	_ "github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
-	_ "github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	_ "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/params"
-	_ "github.com/ethereum/go-ethereum/params"
+	"github.com/samuelgoes/ethereum_test/contract"
 	"log"
 	"math/big"
 )
@@ -25,22 +20,30 @@ func main() {
 	}
 
 	/*
-	// Use infura:
+	// Use Infura:
 	infura := "https://rinkeby.infura.io/v3/89cdc30a5a8c440abfa323d028e0c70f"
 	cl, err := ethclient.Dial(infura)
 	*/
+
+	defer cl.Close()
+
+	hexPrivKey := "0fd57c00030c11b9a1f636dd0e065b78f2afb4eb7cdef9d88ed5eacf39b45930"
+	key, err := crypto.HexToECDSA(hexPrivKey)
+	if err != nil {
+		log.Fatalf("Address is not OK. %v", err)
+	}
 
 	addr := common.HexToAddress("0x9412CbAd85F371CAa6ffC2A1956204d1d6362524")  //Ganache
 
 	ctx := context.Background()
 
 	// Retrieve a block by number
-	block, err := cl.BlockByNumber(ctx, big.NewInt(11205568))
+	block, err := cl.BlockByNumber(ctx, big.NewInt(37))
 	if err != nil {
-		log.Fatalf("error getting block number: %v", err)
+		log.Printf("error getting block number: %v", err)
+	} else {
+		log.Printf("Block: Transactaions: %v", block.Transactions())
 	}
-	log.Printf("Block: Transactaions: %v", block.Transactions())
-
 
 	// Get Balance of an account (nil means at newest block)
 	balance, err := cl.BalanceAt(ctx, addr, nil)
@@ -56,45 +59,72 @@ func main() {
 	}
 	log.Printf("Progress: %v", progress)
 
+	// ****************** DEPLOY ******************
 
-	// Retrieve the pending nonce for an account
-	nonce, err := cl.NonceAt(ctx, addr, nil)
-	to := common.HexToAddress("0xABCD")
-	amount := big.NewInt(10 * params.GWei)
-	gasLimit := uint64(21000)
-	gasPrice := big.NewInt(10 * params.GWei)
-	var data []byte
+	publicKey := key.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		log.Fatalf("error casting public key to ECDSA")
+	}
 
-	// Create a raw unsigned transaction
-	tx := types.NewTransaction(nonce, to, amount, gasLimit, gasPrice, data)
+	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+	nonce, err := cl.PendingNonceAt(context.Background(), fromAddress)
+	if err != nil {
+		log.Fatalf("error reading next nonce")
+	}
 
-	// Use secret key hex string to sign a raw transaction
-	SK := "0x0fd57c00030c11b9a1f636dd0e065b78f2afb4eb7cdef9d88ed5eacf39b45930"
-	sk := crypto.ToECDSAUnsafe(common.FromHex(SK)) // Sign the transaction
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(nil), sk)
-	// You could also create a TransactOpts object
-	opts := bind.NewKeyedTransactor(sk)
-	// To get the address corresponding to your private key
-	addr := crypto.PubkeyToAddress(sk.PublicKey)
+	gasPrice, err := cl.SuggestGasPrice(context.Background())
+	if err != nil {
+		log.Fatalf("error reading suggest gas price")
+	}
 
-    /*
-	// Open Keystore
-	ks := keystore.NewKeyStore("/home/matematik/keystore", keystore.StandardScryptN, keystore.StandardScryptP)
-	// Create an account
-	acc, err := ks.NewAccount("password")
-	// List all accounts
-	accs := ks.Accounts()
-	// Unlock an account
-	ks.Unlock(accs[0], "password")
-	// Create a TransactOpts object
-	ksOpts, err := bind.NewKeyStoreTransactor(ks, accs[0])
-    */
+	chainID, err := cl.ChainID(context.Background())
+	if err != nil {
+		log.Fatalf("unable to get chainID: %v", err)
+	}
 
+	auth, err := bind.NewKeyedTransactorWithChainID(key, chainID)
+	if err != nil {
+		log.Fatalf("unable to build new transactor: %v", err)
+	}
+	auth.Nonce = big.NewInt(int64(nonce))
+	auth.Value = big.NewInt(0)      // in wei
+	auth.GasLimit = uint64(3000000) // in units
+	auth.GasPrice = gasPrice
 
-	// If you have a bind.TransactOpts object you can sign a transaction
-	sigTx, err := opts.Signer(types.NewEIP155Signer(nil), addr, tx)
+	address, _, con, err := contract.DeployContract(auth, cl)
+	if err != nil {
+		log.Fatalf("unable to deploy smart contract. %v", err)
+	}
+	log.Printf("Smart Contract desplegado satisfactoriamente. Address: %s", address.Hex())
 
+	/*
+	// Load Smart Contract
+	address = common.HexToAddress("0xB268907357B70F246ef1dB60c344fB15418F3efb")
+	con, err = contract.NewContract(address, cl)
+	if err != nil {
+		log.Fatalf("unable to deploy smart contract")
+	}
+	log.Printf("Smart Contract cargado satisfactoriamente.")
+	*/
+
+	nonce, err = cl.PendingNonceAt(context.Background(), fromAddress)
+	if err != nil {
+		log.Fatalf("error reading next nonce")
+	}
+	auth.Nonce = big.NewInt(int64(nonce))
+
+	_, err = con.StoreMessage(auth, "Hola Samu")
+	if err != nil {
+		log.Fatalf("unable to call store message function. %v", err)
+	}
+
+	log.Printf("Mensaje almacenado satisfactoriamente")
+
+	message, err := con.RetrieveMessage(nil)
+	if err != nil {
+		log.Fatalf("unable to call store message function")
+	}
+
+	log.Printf("Este es el mensaje almacenado en el Smart Contract: %s", message)
 }
-
-
-
